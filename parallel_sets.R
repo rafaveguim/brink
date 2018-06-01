@@ -3,6 +3,10 @@ library(stringr)
 library(parsetR)
 library(webshot)
 library(htmltools)
+library(magrittr)
+library(vcd)
+library(entropy)
+library(ggplot2)
 
 # Need to install Rafael's version of webshot!
 # devtools::install_github("rafaveguim/webshot")
@@ -84,14 +88,22 @@ simu = function(N_dims, N_levels_mean, N_levels_sd){
     ungroup()
 }
 
-parset2image = function(df, filepath){
+parset2image = function(df, filepath, 
+                        dimensions=NULL,
+                        value="p"){
+  
+  if (is.null(dimensions))
+    dimensions = colnames(select(df, matches('Var\\d$')))
+  
+  value_expression = sprintf("function(d){return d.%s}", value)
+  
   # copied from
   html_print(
     parset(df,
-           dimensions = colnames(select(df, matches('Var\\d$'))),
-           value = htmlwidgets::JS("function(d){return d.p}"),
-           width = 640,
-           height = 480
+       dimensions = dimensions,
+       value = htmlwidgets::JS(value_expression),
+       width = 640,
+       height = 480
     )
   ) %>%
     normalizePath(.,winslash="/") %>%
@@ -111,18 +123,82 @@ uglyparset2jpeg = function(df, filename){
 
 # - Simulate Data ----------------
 
-for (i in seq(10)){
-  N_dims = 3
-  N_levels_mean = 2
-  N_levels_sd = 4
-  
-  df = simu(N_dims, N_levels_mean, N_levels_sd)
-  filename = sprintf("data/parset-%d-%d-%d_%d.jpg", N_dims, N_levels_mean, N_levels_sd, i)
-  # uglyparset2jpeg(df, filename) # works for 3 vars only, and it's ugly
-  parset2image(df, filename)
-}
+# for (i in seq(10)){
+#   N_dims = 3
+#   N_levels_mean = 2
+#   N_levels_sd = 4
+#   
+#   df = simu(N_dims, N_levels_mean, N_levels_sd)
+#   filename = sprintf("data/parset-%d-%d-%d_%d.jpg", N_dims, N_levels_mean, N_levels_sd, i)
+#   # uglyparset2jpeg(df, filename) # works for 3 vars only, and it's ugly
+#   parset2image(df, filename)
+# }
 
 # the uniform distribution chart, this could be the baseline
 # parset(df,     
 #        colnames(select(df, matches('Var\\d$'))))
 
+# - A Titanic-themed random walk -----
+
+Titanic = as.data.frame(Titanic)
+RandomTitanic = Titanic
+
+# start from uniformly distributed data
+RandomTitanic %<>% 
+  mutate(Freq = rep(10, n()))
+  # mutate(Freq = round(sum(Freq)/n()))
+
+nsteps = 25
+nvars  = nrow(RandomTitanic)
+steps  = plyr::aaply(rep(nvars, nsteps), 1,
+  function(n){
+    rnorm(n, 1, 2)
+  }) # each column is a step
+# steps  = ifelse(steps < 0, 0, steps) # if < 0 then 0
+
+path = plyr::aaply(steps, 2, cumsum) # each row is a random walk
+
+# datasets = vector("list", nsteps + 1)
+# datasets[[1]] = RandomTitanic
+
+BaselineData = RandomTitanic
+
+Distance = data.frame(kl = rep(NULL, nsteps), 
+                      js = rep(NULL, nsteps))
+
+for (i in seq(ncol(path))){
+  RandomTitanic %<>% 
+    mutate(Freq = Freq + path[,1]) %>%
+    mutate(Freq = ifelse(Freq < 0, 0, Freq)) # don't let Freq go under 0!
+  
+  # datasets[[i+1]] = RandomTitanic
+  
+  # compute data distance measures
+  
+  m = (BaselineData$Freq + RandomTitanic$Freq)/2 
+  kl_pm = KL.empirical(BaselineData$Freq, m)
+  kl_qm = KL.empirical(RandomTitanic$Freq, m)
+  js = kl_pm/2 + kl_qm/2 # jensen-shannon divergence
+  kl = KL.empirical(BaselineData$Freq, RandomTitanic$Freq)
+  
+  print(sprintf("%f, %f", kl, js))
+  
+  Distance[i, "kl"] = kl
+  Distance[i, "js"] = js
+  
+  parset2image(RandomTitanic,
+     sprintf("data/parset-titanic-%d.jpg", i),
+     dimensions = c("Survived", "Sex", "Age", "Class"),
+     value = "Freq")
+  
+  res = 96
+  width = 640
+  height = 480
+  jpeg(sprintf("data/mosaic-titanic-%d.jpg", i), 
+       width, height, res=res)
+  mosaic(Survived ~ Sex + Age + Class, RandomTitanic)
+  dev.off()
+}
+
+ggplot(Distance, aes(seq(nsteps),js)) +
+  geom_point()

@@ -142,7 +142,7 @@ uglyparset2jpeg = function(df, filename){
 
 Titanic = as.data.frame(Titanic)
 
-nwalks = 2
+nwalks = 5
 nsteps = 20
 nvars  = nrow(Titanic)
 random_walk = function(nvars, nsteps, mean=1, sd=2){
@@ -191,7 +191,7 @@ for (w in seq(nwalks)){
     js = kl_pm/2 + kl_qm/2 # jensen-shannon divergence
     kl = KL.empirical(BaselineData$Freq, RandomTitanic$Freq)
     
-    print(sprintf("%d, %d, %f, %f", w, i, kl, js))
+    # print(sprintf("%d, %d, %f, %f", w, i, kl, js))
     
     r = (w-1)*nsteps + i
     Distance[r, "kl"] = kl
@@ -212,5 +212,11 @@ for (w in seq(nwalks)){
   }
 }
 
-ggplot(Distance, aes(step, js, group=walk)) +
+ggplot(Distance, aes(step, js, color=factor(walk))) +
   geom_point()
+ggsave("data/data-distance.png")
+
+
+write.csv(Distance, "data/data-distance.csv", row.names = FALSE)
+
+print(Distance)

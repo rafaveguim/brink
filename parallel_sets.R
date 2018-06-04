@@ -141,64 +141,76 @@ uglyparset2jpeg = function(df, filename){
 # - A Titanic-themed random walk -----
 
 Titanic = as.data.frame(Titanic)
-RandomTitanic = Titanic
 
-# start from uniformly distributed data
-RandomTitanic %<>% 
-  mutate(Freq = rep(10, n()))
-  # mutate(Freq = round(sum(Freq)/n()))
+nwalks = 2
+nsteps = 20
+nvars  = nrow(Titanic)
+random_walk = function(nvars, nsteps, mean=1, sd=2){
+  # a walk over the integers with step 1 or -1
+  # steps  = replicate(nvars, rnorm(nsteps, mean, sd))
+  prob  = function() {p1 = runif(1); c(p1, 1-p1)}
+  steps = replicate(nvars, sample(c(1,-1), nsteps, replace=TRUE, prob=prob()))
+  steps = ifelse(steps>0, 1, -1)
+  return(t(steps)) # columns are steps, rows are vars
+}
 
-nsteps = 25
-nvars  = nrow(RandomTitanic)
-steps  = plyr::aaply(rep(nvars, nsteps), 1,
-  function(n){
-    rnorm(n, 1, 2)
-  }) # each column is a step
-# steps  = ifelse(steps < 0, 0, steps) # if < 0 then 0
-
-path = plyr::aaply(steps, 2, cumsum) # each row is a random walk
+walks = replicate(nwalks,         # a list of matrices
+  random_walk(nvars, nsteps), 
+  simplify=F) 
 
 # datasets = vector("list", nsteps + 1)
 # datasets[[1]] = RandomTitanic
 
-BaselineData = RandomTitanic
+Distance = data.frame(
+    walk = rep(seq(nwalks), each=nsteps),
+    step = rep(seq(nsteps), nwalks),
+    kl = rep(NA, nsteps*nwalks), 
+    js = rep(NA, nsteps*nwalks)
+)
 
-Distance = data.frame(kl = rep(NULL, nsteps), 
-                      js = rep(NULL, nsteps))
 
-for (i in seq(ncol(path))){
-  RandomTitanic %<>% 
-    mutate(Freq = Freq + path[,1]) %>%
-    mutate(Freq = ifelse(Freq < 0, 0, Freq)) # don't let Freq go under 0!
+for (w in seq(nwalks)){
+  # start from uniformly distributed data
+  RandomTitanic = Titanic
+  RandomTitanic %<>% mutate(Freq = rep(10, n()))
+  BaselineData = RandomTitanic
   
-  # datasets[[i+1]] = RandomTitanic
-  
-  # compute data distance measures
-  
-  m = (BaselineData$Freq + RandomTitanic$Freq)/2 
-  kl_pm = KL.empirical(BaselineData$Freq, m)
-  kl_qm = KL.empirical(RandomTitanic$Freq, m)
-  js = kl_pm/2 + kl_qm/2 # jensen-shannon divergence
-  kl = KL.empirical(BaselineData$Freq, RandomTitanic$Freq)
-  
-  print(sprintf("%f, %f", kl, js))
-  
-  Distance[i, "kl"] = kl
-  Distance[i, "js"] = js
-  
-  parset2image(RandomTitanic,
-     sprintf("data/parset-titanic-%d.jpg", i),
-     dimensions = c("Survived", "Sex", "Age", "Class"),
-     value = "Freq")
-  
-  res = 96
-  width = 640
-  height = 480
-  jpeg(sprintf("data/mosaic-titanic-%d.jpg", i), 
-       width, height, res=res)
-  mosaic(Survived ~ Sex + Age + Class, RandomTitanic)
-  dev.off()
+  for (i in seq(nsteps)){
+    walk = walks[[w]]
+    RandomTitanic %<>% 
+      mutate(Freq = Freq + walk[,i]) %>%
+      mutate(Freq = ifelse(Freq < 0, 0, Freq)) # don't let Freq go under 0!
+    
+    # datasets[[i+1]] = RandomTitanic
+    
+    # compute data distance measures
+    
+    m = (BaselineData$Freq + RandomTitanic$Freq)/2 
+    kl_pm = KL.empirical(BaselineData$Freq, m)
+    kl_qm = KL.empirical(RandomTitanic$Freq, m)
+    js = kl_pm/2 + kl_qm/2 # jensen-shannon divergence
+    kl = KL.empirical(BaselineData$Freq, RandomTitanic$Freq)
+    
+    print(sprintf("%d, %d, %f, %f", w, i, kl, js))
+    
+    r = (w-1)*nsteps + i
+    Distance[r, "kl"] = kl
+    Distance[r, "js"] = js
+    
+    parset2image(RandomTitanic,
+       sprintf("data/parset-titanic-%d-%d.jpg", w, i),
+       dimensions = c("Survived", "Sex", "Age", "Class"),
+       value = "Freq")
+    
+    res = 96
+    width = 640
+    height = 480
+    jpeg(sprintf("data/mosaic-titanic-%d-%d.jpg", w, i), 
+         width, height, res=res)
+    mosaic(Survived ~ Sex + Age + Class, RandomTitanic)
+    dev.off()
+  }
 }
 
-ggplot(Distance, aes(seq(nsteps),js)) +
+ggplot(Distance, aes(step, js, group=walk)) +
   geom_point()

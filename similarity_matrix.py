@@ -7,12 +7,12 @@ import skimage.measure as measures
 
 import argparse
 import pandas as pd
-import plotnine
 
 from pathlib import Path
+from multiprocessing.pool import Pool
 
 import itertools
-from math import floor, ceil
+from math import floor, ceil, factorial
 from tqdm import tqdm
 
 def options():
@@ -20,6 +20,8 @@ def options():
     parser.add_argument('images', nargs='+')
     parser.add_argument('--csv', action='store_true')
     parser.add_argument('--rotation_invariant', action='store_true')
+    parser.add_argument('--parallel', action='store_true')
+    parser.add_argument('--num_processes', type=int, default=4)
     return parser.parse_args()
 
 
@@ -94,7 +96,7 @@ def pad_images(imgA, imgB):
     return (imgA, imgB)
 
 def pad_image(img, w, h):
-        # add padding so that images have the same size (if needed)
+    # add padding so that images have the same size (if needed)
     width  = lambda x: x.shape[1]
     height = lambda x: x.shape[0]
 
@@ -134,36 +136,8 @@ def rotate(img, angle):
 def scale(img, width, height):
     return cv2.resize(img, (width, height), interpolation = cv2.INTER_CUBIC)
 
-if __name__ == '__main__':
-    opts = options()
-
-    # Load images
-    images = []
-
-    for image_path in opts.images:
-        image_path = Path(image_path)
-
-        img = cv2.imread(str(image_path))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        images.append((image_path, img))
-
-
-    # # Pad all images relative to the largest one
-    # max_width  = max(map(lambda x: x[1].shape[1], images))
-    # max_height = max(map(lambda x: x[1].shape[0], images))
-
-    # Scale all images to lowest size
-    width  = min(map(lambda x: x[1].shape[1], images))
-    height = min(map(lambda x: x[1].shape[0], images))
-
-    # if rotation invariant, we want all images to be a perfect square
-    if opts.rotation_invariant:
-        width = height = max(width, height)
-
-    images = [(imgpath, scale(img, width, height)) for imgpath, img in tqdm(images)]
-
-    if opts.rotation_invariant:
+def do_singleprocess(images, is_rotation_invariant=False):
+    if is_rotation_invariant:
         rotations = dict()
         for path, img in images:
             rotations[path] = (rotate(img,  90),
@@ -178,13 +152,8 @@ if __name__ == '__main__':
 
         ssim = compare(imgA, imgB, measures.compare_ssim)
 
-        if opts.rotation_invariant:
+        if is_rotation_invariant:
             imgB_90, imgB_180, imgB_270 = rotations[imgB_path]
-
-            # cv2.imshow('refImage', imgA)
-            # cv2.imshow('90', imgB_90)
-            # cv2.imshow('180', imgB_180)
-            # cv2.imshow('270', imgB_270)
 
             ssim_90  = compare(imgA, imgB_90, measures.compare_ssim)
             ssim_180 = compare(imgA, imgB_180, measures.compare_ssim)
@@ -192,16 +161,105 @@ if __name__ == '__main__':
 
             ssim = max(ssim, ssim_90, ssim_180, ssim_270)
 
-            # print('best score ', ssim)
-            # input("Proceed")
-
         records.append((imgA_path.name,
             imgB_path.name,
             ssim))
 
+    return records
+
+class Doer():
+    def __init__(self, is_rotation_invariant=False, rotations=None):
+        self.is_rotation_invariant = is_rotation_invariant
+        self.rotations = rotations
+
+    def do(self, in_tuple):
+        (imgA_path, imgA), (imgB_path, imgB) = in_tuple
+
+        ssim = compare(imgA, imgB, measures.compare_ssim)
+
+        if self.is_rotation_invariant:
+            imgB_90, imgB_180, imgB_270 = self.rotations[imgB_path]
+
+            ssim_90  = compare(imgA, imgB_90, measures.compare_ssim)
+            ssim_180 = compare(imgA, imgB_180, measures.compare_ssim)
+            ssim_270 = compare(imgA, imgB_270, measures.compare_ssim)
+
+            ssim = max(ssim, ssim_90, ssim_180, ssim_270)
+
+        return imgA_path.name, imgB_path.name, ssim
+
+
+# def do_multiprocess(images, num_processes, is_rotation_invariant=False):
+#     if is_rotation_invariant:
+#         rotations = dict()
+#         for path, img in images:
+#             rotations[path] = (rotate(img,  90),
+#                                rotate(img, 180),
+#                                rotate(img, 270))
+
+#     pool = Pool(num_processes)
+#     doer = Doer(is_rotation_invariant, rotations)
+
+#     records = pool.map(doer.do, list(itertools.combinations(images, 2)))
+
+#     return records
+
+def do_multiprocess(images, num_processes, is_rotation_invariant=False):
+    if is_rotation_invariant:
+        rotations = dict()
+        for path, img in images:
+            rotations[path] = (rotate(img,  90),
+                               rotate(img, 180),
+                               rotate(img, 270))
+
+    pool = Pool(num_processes)
+    doer = Doer(is_rotation_invariant, rotations)
+
+    n_images = len(images)
+    n_combinations = factorial(n_images) / (factorial(2) * factorial(n_images-2) )
+
+    records=[]
+    with tqdm(total=n_combinations) as pbar:
+        for record in tqdm(pool.imap_unordered(doer.do, list(itertools.combinations(images, 2)), chunksize=50)):
+            records.append(record)
+            pbar.update()
+
+    return records
+
+
+if __name__ == '__main__':
+    opts = options()
+
+    # Load images
+    images = []
+
+    for image_path in opts.images:
+        image_path = Path(image_path)
+
+        img = cv2.imread(str(image_path))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        images.append((image_path, img))
+
+    # Scale all images to lowest size
+    width  = min(map(lambda x: x[1].shape[1], images))
+    height = min(map(lambda x: x[1].shape[0], images))
+
+    # if rotation invariant, we want all images to be a perfect square
+    if opts.rotation_invariant:
+        width = height = max(width, height)
+
+    images = [(imgpath, scale(img, width, height)) for imgpath, img in tqdm(images)]
+
+    if opts.parallel:
+        records = do_multiprocess(images, opts.num_processes, opts.rotation_invariant)
+    else:
+        records = do_singleprocess(images, opts.rotation_invariant)
+        
+
     df = pd.DataFrame.from_records(records, columns=['A', 'B', 'ssim_distance'])
     if opts.csv:
-        df.to_csv(sys.stdout, index=False)
+        df.to_csv("/dev/stdout", index=False)
     else:
         print(df.to_string())
 

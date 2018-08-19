@@ -22,6 +22,7 @@ def options():
     parser.add_argument('--rotation_invariant', action='store_true')
     parser.add_argument('--parallel', action='store_true')
     parser.add_argument('--num_processes', type=int, default=4)
+    parser.add_argument('--measure', default='ssim', choices=['ssim', 'mse'])
     return parser.parse_args()
 
 
@@ -136,7 +137,7 @@ def rotate(img, angle):
 def scale(img, width, height):
     return cv2.resize(img, (width, height), interpolation = cv2.INTER_CUBIC)
 
-def do_singleprocess(images, is_rotation_invariant=False):
+def do_singleprocess(images, measure, is_rotation_invariant=False):
     if is_rotation_invariant:
         rotations = dict()
         for path, img in images:
@@ -150,43 +151,44 @@ def do_singleprocess(images, is_rotation_invariant=False):
         imgA_path, imgA = a
         imgB_path, imgB = b
 
-        ssim = compare(imgA, imgB, measures.compare_ssim)
+        value = compare(imgA, imgB, measure)
 
         if is_rotation_invariant:
             imgB_90, imgB_180, imgB_270 = rotations[imgB_path]
 
-            ssim_90  = compare(imgA, imgB_90, measures.compare_ssim)
-            ssim_180 = compare(imgA, imgB_180, measures.compare_ssim)
-            ssim_270 = compare(imgA, imgB_270, measures.compare_ssim)
+            value_90  = compare(imgA, imgB_90,  measure)
+            value_180 = compare(imgA, imgB_180, measure)
+            value_270 = compare(imgA, imgB_270, measure)
 
-            ssim = max(ssim, ssim_90, ssim_180, ssim_270)
+            value = max(value, value_90, value_180, value_270)
 
         records.append((imgA_path.name,
             imgB_path.name,
-            ssim))
+            value))
 
     return records
 
 class Doer():
-    def __init__(self, is_rotation_invariant=False, rotations=None):
+    def __init__(self, measure, is_rotation_invariant=False, rotations=None):
         self.is_rotation_invariant = is_rotation_invariant
         self.rotations = rotations
+        self.measure = measure
 
     def do(self, in_tuple):
         (imgA_path, imgA), (imgB_path, imgB) = in_tuple
 
-        ssim = compare(imgA, imgB, measures.compare_ssim)
+        value = compare(imgA, imgB, measure)
 
         if self.is_rotation_invariant:
             imgB_90, imgB_180, imgB_270 = self.rotations[imgB_path]
 
-            ssim_90  = compare(imgA, imgB_90, measures.compare_ssim)
-            ssim_180 = compare(imgA, imgB_180, measures.compare_ssim)
-            ssim_270 = compare(imgA, imgB_270, measures.compare_ssim)
+            value_90  = compare(imgA, imgB_90,  measure)
+            value_180 = compare(imgA, imgB_180, measure)
+            value_270 = compare(imgA, imgB_270, measure)
 
-            ssim = max(ssim, ssim_90, ssim_180, ssim_270)
+            value = max(value, value_90, value_180, value_270)
 
-        return imgA_path.name, imgB_path.name, ssim
+        return imgA_path.name, imgB_path.name, value
 
 
 # def do_multiprocess(images, num_processes, is_rotation_invariant=False):
@@ -204,7 +206,8 @@ class Doer():
 
 #     return records
 
-def do_multiprocess(images, num_processes, is_rotation_invariant=False):
+def do_multiprocess(images, measure, num_processes, is_rotation_invariant=False):
+    rotations = None
     if is_rotation_invariant:
         rotations = dict()
         for path, img in images:
@@ -213,7 +216,7 @@ def do_multiprocess(images, num_processes, is_rotation_invariant=False):
                                rotate(img, 270))
 
     pool = Pool(num_processes)
-    doer = Doer(is_rotation_invariant, rotations)
+    doer = Doer(measure, is_rotation_invariant, rotations)
 
     n_images = len(images)
     n_combinations = factorial(n_images) / (factorial(2) * factorial(n_images-2) )
@@ -229,6 +232,11 @@ def do_multiprocess(images, num_processes, is_rotation_invariant=False):
 
 if __name__ == '__main__':
     opts = options()
+
+    if opts.measure == 'ssim':
+        measure =  measures.compare_ssim
+    else:
+        measure =  measures.compare_nrmse
 
     # Load images
     images = []
@@ -252,12 +260,12 @@ if __name__ == '__main__':
     images = [(imgpath, scale(img, width, height)) for imgpath, img in tqdm(images)]
 
     if opts.parallel:
-        records = do_multiprocess(images, opts.num_processes, opts.rotation_invariant)
+        records = do_multiprocess(images, measure, opts.num_processes, opts.rotation_invariant)
     else:
-        records = do_singleprocess(images, opts.rotation_invariant)
-        
+        records = do_singleprocess(images, measure, opts.rotation_invariant)
 
-    df = pd.DataFrame.from_records(records, columns=['A', 'B', 'ssim_distance'])
+
+    df = pd.DataFrame.from_records(records, columns=['A', 'B', 'measure'])
     if opts.csv:
         df.to_csv("/dev/stdout", index=False)
     else:

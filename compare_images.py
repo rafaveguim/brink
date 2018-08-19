@@ -13,6 +13,7 @@ def options():
 	parser.add_argument('imageA')
 	parser.add_argument('imageB', nargs='+')
 	parser.add_argument('--csv', action='store_true')
+	parser.add_argument('--no_header', action='store_true')
 	return parser.parse_args()
 
 
@@ -34,7 +35,6 @@ def compare(imageA, imageB, measure=None):
 	return measure(imageA, imageB)
 	
 
-
 if __name__ == '__main__':
 	opts = options()
 
@@ -50,18 +50,18 @@ if __name__ == '__main__':
 		contrast = cv2.imread(str(imageB_path))
 		contrast = cv2.cvtColor(contrast, cv2.COLOR_BGR2GRAY)
 
-		ssim_distance  = 1 - compare(original, contrast, measures.compare_ssim)
-		nrmse_distance =     compare(original, contrast, measures.compare_nrmse)
+		ssim  = compare(original, contrast, measures.compare_ssim)
+		nrmse = compare(original, contrast, measures.compare_nrmse)
 
 		records.append((imageA_path.name, 
 			imageB_path.name,
-			ssim_distance,
-			nrmse_distance))
+			ssim,
+			nrmse))
 
 	df = pd.DataFrame.from_records(records, columns=['A', 'B', 'ssim', 'nrmse'])
 	if opts.csv:
-		df.to_csv(sys.stdout, index=False)
+		df.to_csv(sys.stdout, index=False, header=not opts.no_header)
 	else:	
-		print(df.to_string())
+		print(df.to_string(header=not opts.no_header))
 
 

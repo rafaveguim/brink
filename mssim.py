@@ -16,16 +16,21 @@
 # ==============================================================================
 
 """Python implementation of MS-SSIM.
-
-Usage:
-
-python msssim.py --original_image=original.png --compared_image=distorted.png
 """
+
+import warnings
+warnings.filterwarnings('ignore')
+
 import numpy as np
 from scipy import signal
 from scipy.ndimage.filters import convolve
 import tensorflow as tf
 from skimage.transform import resize
+import argparse
+from pathlib import Path
+
+
+
 
 tf.flags.DEFINE_string('original_image', None, 'Path to PNG image.')
 tf.flags.DEFINE_string('compared_image', None, 'Path to PNG image.')
@@ -85,8 +90,6 @@ def _SSIMForMultiScale(img1, img2, max_val=255, filter_size=11,
   img2 = img2.astype(np.float64)
   _, height, width, _ = img1.shape
 
-  print(img1.shape)
-
   # Filter size can't be larger than height or width of images.
   size = min(filter_size, height, width)
 
@@ -130,7 +133,7 @@ def _SSIMForMultiScale(img1, img2, max_val=255, filter_size=11,
 
 
 def MultiScaleSSIM(img1, img2, max_val=255, filter_size=11, filter_sigma=1.5,
-                   k1=0.01, k2=0.03, weights=None):
+                   k1=0.01, k2=0.03, weights=None, components=False):
   """Return the MS-SSIM score between `img1` and `img2`.
 
   This function implements Multi-Scale Structural Similarity (MS-SSIM) Image
@@ -155,6 +158,7 @@ def MultiScaleSSIM(img1, img2, max_val=255, filter_size=11, filter_sigma=1.5,
       the original paper).
     weights: List of weights for each level; if none, use five levels and the
       weights from the original paper.
+    components: If True, return the per-scale SSIM values.
 
   Returns:
     MS-SSIM score between `img1` and `img2`.
@@ -174,6 +178,8 @@ def MultiScaleSSIM(img1, img2, max_val=255, filter_size=11, filter_sigma=1.5,
   weights = np.array(weights if weights else
                      [0.0448, 0.2856, 0.3001, 0.2363, 0.1333])
   levels = weights.size
+  # the following abracadabra creates a 2 x 2 kernel with
+  # weights 0.25
   downsample_filter = np.ones((1, 2, 2, 1)) / 4.0
   im1, im2 = [x.astype(np.float64) for x in [img1, img2]]
   mssim = np.array([])
@@ -186,30 +192,37 @@ def MultiScaleSSIM(img1, img2, max_val=255, filter_size=11, filter_sigma=1.5,
     mcs = np.append(mcs, cs)
     filtered = [convolve(im, downsample_filter, mode='reflect')
                 for im in [im1, im2]]
+    # subsample by taking every other pixel in each direction
+    # therefore reducing the image by half
+    # ::2 means "take every other element"
     im1, im2 = [x[:, ::2, ::2, :] for x in filtered]
-  return (np.prod(mcs[0:levels-1] ** weights[0:levels-1]) *
+
+  if components:
+  	return mcs, mssim
+  else:
+  	return (np.prod(mcs[0:levels-1] ** weights[0:levels-1]) *
           (mssim[levels-1] ** weights[levels-1]))
 
 
-def main(_):
-  if FLAGS.original_image is None or FLAGS.compared_image is None:
-    print('\nUsage: python msssim.py --original_image=original.png '
-          '--compared_image=distorted.png\n\n')
-    return
+def options():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('images', nargs=2)
+    parser.add_argument('--weights', nargs='+', type=float)
+    parser.add_argument('--components', action='store_true')
 
-  if not tf.gfile.Exists(FLAGS.original_image):
-    print('\nCannot find --original_image.\n')
-    return
+    return parser.parse_args()
 
-  if not tf.gfile.Exists(FLAGS.compared_image):
-    print('\nCannot find --compared_image.\n')
-    return
 
-  with tf.gfile.FastGFile(FLAGS.original_image, mode='rb') as image_file:
+def main():
+  opts = options()
+  img1_path, img2_path = opts.images
+
+
+  with tf.gfile.FastGFile(img1_path, mode='rb') as image_file:
     img1_str = image_file.read()
-    
-  with tf.gfile.FastGFile(FLAGS.compared_image, mode='rb') as image_file:
-    img2_str = image_file.read() 
+
+  with tf.gfile.FastGFile(img2_path, mode='rb') as image_file:
+    img2_str = image_file.read()
 
   input_img = tf.placeholder(tf.string)
   decoded_image = tf.expand_dims(tf.image.decode_png(input_img, channels=3), 0)
@@ -225,10 +238,24 @@ def main(_):
   images = [resize(img, (1, height, width, 3)) for img in images]
   img1, img2 = images
 
-  print((MultiScaleSSIM(img1, img2, max_val=255, weights=[0.1, 0.1, 0.1, 0.2, 0.5])))
+  if opts.components:
+    mcs, mssim = MultiScaleSSIM(img1, img2, max_val=255, weights=opts.weights, components=opts.components)
+    print("{},{},{},{}".format(
+	    Path(img1_path).name,
+	    Path(img2_path).name,
+	    ','.join(map(str,mcs)),
+	    ','.join(map(str,mssim))))
+  else:
+    print("{},{},{:f}".format(
+	    Path(img1_path).name,
+	    Path(img2_path).name,
+	    MultiScaleSSIM(img1, img2, max_val=255, weights=opts.weights, components=opts.components)
+	  ))
+
+
   # print((MultiScaleSSIM(img1, img2, max_val=255, weights=[1])))
 
 
 if __name__ == '__main__':
-  tf.app.run()
-
+  main()
+  # tf.app.run()

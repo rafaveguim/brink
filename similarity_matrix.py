@@ -23,6 +23,7 @@ def options():
     parser.add_argument('--parallel', action='store_true')
     parser.add_argument('--num_processes', type=int, default=4)
     parser.add_argument('--measure', default='ssim', choices=['ssim', 'mse'])
+    parser.add_argument('--downsample', type=float, default=None)
     return parser.parse_args()
 
 
@@ -253,6 +254,11 @@ if __name__ == '__main__':
     width  = min(map(lambda x: x[1].shape[1], images))
     height = min(map(lambda x: x[1].shape[0], images))
 
+    if opts.downsample:
+        width  = round(opts.downsample * width)
+        height = round(opts.downsample * height)
+
+
     # if rotation invariant, we want all images to be a perfect square
     if opts.rotation_invariant:
         width = height = max(width, height)
@@ -270,5 +276,3 @@ if __name__ == '__main__':
         df.to_csv("/dev/stdout", index=False)
     else:
         print(df.to_string())
-
-

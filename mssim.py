@@ -26,15 +26,23 @@ from scipy import signal
 from scipy.ndimage.filters import convolve
 import tensorflow as tf
 from skimage.transform import resize
-import argparse
 from pathlib import Path
 
+import itertools
+import argparse
 
+from tqdm import tqdm
 
+from multiprocessing.pool import Pool
+
+from math import factorial
 
 tf.flags.DEFINE_string('original_image', None, 'Path to PNG image.')
 tf.flags.DEFINE_string('compared_image', None, 'Path to PNG image.')
 FLAGS = tf.flags.FLAGS
+
+
+image_cache = dict() # image path -> array[0:M], where M is the number of scales
 
 
 def _FSpecialGauss(size, sigma):
@@ -132,7 +140,7 @@ def _SSIMForMultiScale(img1, img2, max_val=255, filter_size=11,
   return ssim, cs
 
 
-def MultiScaleSSIM(img1, img2, max_val=255, filter_size=11, filter_sigma=1.5,
+def MultiScaleSSIM(img1_list, img2_list, max_val=255, filter_size=11, filter_sigma=1.5,
                    k1=0.01, k2=0.03, weights=None, components=False):
   """Return the MS-SSIM score between `img1` and `img2`.
 
@@ -167,47 +175,45 @@ def MultiScaleSSIM(img1, img2, max_val=255, filter_size=11, filter_sigma=1.5,
     RuntimeError: If input images don't have the same shape or don't have four
       dimensions: [batch_size, height, width, depth].
   """
-  if img1.shape != img2.shape:
-    raise RuntimeError('Input images must have the same shape (%s vs. %s).',
-                       img1.shape, img2.shape)
-  if img1.ndim != 4:
-    raise RuntimeError('Input images must have four dimensions, not %d',
-                       img1.ndim)
 
   # Note: default weights don't sum to 1.0 but do match the paper / matlab code.
   weights = np.array(weights if weights else
                      [0.0448, 0.2856, 0.3001, 0.2363, 0.1333])
-  levels = weights.size
-  # the following abracadabra creates a 2 x 2 kernel with
-  # weights 0.25
-  downsample_filter = np.ones((1, 2, 2, 1)) / 4.0
-  im1, im2 = [x.astype(np.float64) for x in [img1, img2]]
+
   mssim = np.array([])
   mcs = np.array([])
-  for _ in range(levels):
+  for im1, im2 in zip(img1_list, img2_list):
     ssim, cs = _SSIMForMultiScale(
         im1, im2, max_val=max_val, filter_size=filter_size,
         filter_sigma=filter_sigma, k1=k1, k2=k2)
     mssim = np.append(mssim, ssim)
     mcs = np.append(mcs, cs)
-    filtered = [convolve(im, downsample_filter, mode='reflect')
-                for im in [im1, im2]]
-    # subsample by taking every other pixel in each direction
-    # therefore reducing the image by half
-    # ::2 means "take every other element"
-    im1, im2 = [x[:, ::2, ::2, :] for x in filtered]
 
   if components:
   	return mcs, mssim
   else:
+  	levels = weights.size
   	return (np.prod(mcs[0:levels-1] ** weights[0:levels-1]) *
           (mssim[levels-1] ** weights[levels-1]))
 
 
+class MSSIM_Caller():
+  def __init__(self, **kwargs):
+    self.kwargs = kwargs
+    
+  def call(self, in_tuple):
+    image1_name, image2_name = in_tuple
+    img1 = image_cache[image1_name]
+    img2 = image_cache[image2_name]
+    return (image1_name, image2_name, MultiScaleSSIM(img1, img2, **self.kwargs))
+
+
 def options():
     parser = argparse.ArgumentParser()
-    parser.add_argument('images', nargs=2)
-    parser.add_argument('--weights', nargs='+', type=float)
+    parser.add_argument('images', nargs='+')
+    parser.add_argument('--num_processes', default=2)
+    parser.add_argument('--weights', nargs='+', 
+    	type=float, default=[0.0448, 0.2856, 0.3001, 0.2363, 0.1333])
     parser.add_argument('--components', action='store_true')
 
     return parser.parse_args()
@@ -215,45 +221,72 @@ def options():
 
 def main():
   opts = options()
-  img1_path, img2_path = opts.images
 
+  num_processes = opts.num_processes
+  image_paths = opts.images
 
-  with tf.gfile.FastGFile(img1_path, mode='rb') as image_file:
-    img1_str = image_file.read()
+  images = []
+  image_names = [Path(p).stem for p in image_paths]
+  
+  for img_path in image_paths:
+    with tf.gfile.FastGFile(img_path, mode='rb') as image_file:
+      img_str = image_file.read()
 
-  with tf.gfile.FastGFile(img2_path, mode='rb') as image_file:
-    img2_str = image_file.read()
+    input_img = tf.placeholder(tf.string)
+    decoded_image = tf.expand_dims(tf.image.decode_png(input_img, channels=3), 0)
 
-  input_img = tf.placeholder(tf.string)
-  decoded_image = tf.expand_dims(tf.image.decode_png(input_img, channels=3), 0)
+    with tf.Session() as sess:
+      img = sess.run(decoded_image, feed_dict={input_img: img_str})
+    
+    images.append(img.astype(np.float64))
 
-  with tf.Session() as sess:
-    img1 = sess.run(decoded_image, feed_dict={input_img: img1_str})
-    img2 = sess.run(decoded_image, feed_dict={input_img: img2_str})
-
-  # Scale all image to lowest size
-  images = [img1.astype(np.float64), img2.astype(np.float64)]
+  # Scale all images to lowest size
   width  = min(map(lambda x: x.shape[2], images))
   height = min(map(lambda x: x.shape[1], images))
-  images = [resize(img, (1, height, width, 3)) for img in images]
-  img1, img2 = images
 
-  if opts.components:
-    mcs, mssim = MultiScaleSSIM(img1, img2, max_val=255, weights=opts.weights, components=opts.components)
-    print("{},{},{},{}".format(
-	    Path(img1_path).name,
-	    Path(img2_path).name,
+  for i, img in enumerate(images):	
+    img = resize(img, (1, height, width, 3))
+
+	# downsample img
+    downsample_filter = np.ones((1, 2, 2, 1)) / 4.0
+    image_cache[image_names[i]] = [img]
+	
+    for _ in range(len(opts.weights)-1):
+      x = convolve(img, downsample_filter, mode='reflect')
+      img = x[:, ::2, ::2, :]
+      image_cache[image_names[i]].append(img)
+
+  n_images = len(images)
+  n_combinations = factorial(n_images) / (factorial(2) * factorial(n_images-2) )
+  pairs = itertools.combinations(image_names, 2)
+  pool = Pool(num_processes)
+  caller = MSSIM_Caller(weights=opts.weights, components=opts.components)
+  results = []
+
+
+  with tqdm(total=n_combinations) as pbar:
+    for record in tqdm(pool.imap_unordered(caller.call, list(pairs), chunksize=50)):
+      results.append(record)
+      pbar.update()
+
+  for result in results:
+    if opts.components:
+      
+      img1_name, img2_name, (mcs, mssim) = result
+      print("{},{},{},{}".format(
+	    img1_name,
+	    img2_name,
 	    ','.join(map(str,mcs)),
 	    ','.join(map(str,mssim))))
-  else:
-    print("{},{},{:f}".format(
-	    Path(img1_path).name,
-	    Path(img2_path).name,
-	    MultiScaleSSIM(img1, img2, max_val=255, weights=opts.weights, components=opts.components)
+    else:
+      
+      img1_name, img2_name, mssim = result
+      print("{},{},{:f}".format(
+	    img1_name,
+	    img2_name,
+	    mssim
 	  ))
 
-
-  # print((MultiScaleSSIM(img1, img2, max_val=255, weights=[1])))
 
 
 if __name__ == '__main__':

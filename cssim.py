@@ -29,6 +29,7 @@ def options():
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--filter_size', type=int, default=11)
     parser.add_argument('--weight_background', type=float, default=1)
+    parser.add_argument('--downsample', type=float, default=None)
     return parser.parse_args()
 
 
@@ -124,18 +125,25 @@ def SSIM(img1, img2, max_val=255, filter_size=11,
     v1 = 2.0 * sigma12 + c2
     v2 = sigma11 + sigma22 + c2
 
+    ssim = (((2.0 * mu12 + c1) * v1) / ((mu11 + mu22 + c1) * v2))
+
+    if DEBUG:
+        cv2.imshow("ssim", ssim)
+        cv2.waitKey(0)
+
+
     if weights is not None:
-        # cv2.imshow("ssim", (((2.0 * mu12 + c1) * v1) / ((mu11 + mu22 + c1) * v2)))
-        # cv2.imshow("weights", weights.astype(np.float))
-        # cv2.waitKey(0)
+        
         padding = math.floor(size/2)
         weights = weights[padding:-padding, padding:-padding]
 
-        ssim = np.average(
-            (((2.0 * mu12 + c1) * v1) / ((mu11 + mu22 + c1) * v2)),
-            weights=weights)
+        if DEBUG:
+            cv2.imshow("weighted ssim", ssim*weights)
+            cv2.waitKey(0)
+
+        ssim = np.average(ssim, weights=weights)
     else:
-        ssim = np.mean((((2.0 * mu12 + c1) * v1) / ((mu11 + mu22 + c1) * v2)))
+        ssim = np.mean(ssim)
 
     cs = np.mean(v1 / v2)
     return ssim, cs
@@ -165,16 +173,36 @@ def extract_hue(color, img):
     h_tresh = 20
     
     # For HSV, Hue range is [0,179], Saturation range is [0,255] and Value range is [0,255]
-    min_hsv = np.array([max(0.0, color[0] - h_tresh),  5.0,   0.0])
+    min_hsv = np.array([max(0.0, color[0] - h_tresh),  10.0,   0.0])
     max_hsv = np.array([min(179.0, color[0] + h_tresh), 250.0, 255.0])
 
     mask = cv2.inRange(img, min_hsv, max_hsv)
     result = cv2.bitwise_and(img, img, mask = mask)
+
+    return cv2.cvtColor(result, cv2.COLOR_HSV2BGR)
+
+def extract_hue_range(min_hue, max_hue, img):
+    """
+    Arguments:
+      min_hue: min hue (HSV), from 0 to 179
+      max_hue: max hue (HSV), from 0 to 179
+    """
+
+    # For HSV, Hue range is [0,179], Saturation range is [0,255] and Value range is [0,255]
+    min_hsv = np.array([min_hue,  0.0,   0.0])
+    max_hsv = np.array([max_hue, 255.0, 255.0])
+
+    mask = cv2.inRange(img, min_hsv, max_hsv)
+    result = cv2.bitwise_and(img, img, mask = mask)
+
+    # cv2.imshow("layer", cv2.cvtColor(result, cv2.COLOR_HSV2BGR))
+    # cv2.waitKey()
+
     return cv2.cvtColor(result, cv2.COLOR_HSV2BGR)
 
 
 def scale(img, width, height):
-    return cv2.resize(img, (width, height), interpolation = cv2.INTER_CUBIC)
+    return cv2.resize(img, (width, height), interpolation = cv2.INTER_NEAREST)
 
 
 if __name__ == '__main__':
@@ -182,26 +210,52 @@ if __name__ == '__main__':
 
     DEBUG = opts.debug
 
+    background = "white"
+    compare_background = True
+
+    # split the Hue space into 4 layers, the first holds the background (white or black)
+    n_layers = 4 # number of layers in addition to background
+    hue_range_size = round(179/n_layers) 
+    hue_ranges = [(i*hue_range_size, j*hue_range_size - 1) \
+        for i, j in zip(range(n_layers), range(1,n_layers+1))]
+
+    if background == "white":
+        hue_ranges = [(i+1, j+1) for i, j in hue_ranges]
+        if compare_background: hue_ranges.insert(0, (0,0))
+    elif background == "black":
+        hue_ranges = [(i-1, j-1) for i, j in hue_ranges]
+        if compare_background: hue_ranges.insert(0, (179,179))
+
+    if compare_background: n_layers += 1
+
+    print(hue_ranges)
+
     filter_size = opts.filter_size
     weight_background = opts.weight_background
     image_paths = opts.images
     image_names = [Path(p).stem for p in image_paths]
-    images = [cv2.imread(path) for path in image_paths]
+    images = [cv2.imread(path, cv2.IMREAD_UNCHANGED) for path in image_paths]
     images = [cv2.cvtColor(img, cv2.COLOR_BGR2HSV) for img in images]
 
     # Scale all images to lowest size
     width  = min(map(lambda x: x.shape[1], images))
     height = min(map(lambda x: x.shape[0], images))
+
+    if opts.downsample:
+        width  = round(opts.downsample * width)
+        height = round(opts.downsample * height)
+
     images = [scale(img, width, height) for img in images]
 
-    colors_hex = opts.colors
-    colors = list(map(hex2hsv, colors_hex))
+    # colors_hex = opts.colors
+    # colors = list(map(hex2hsv, colors_hex))
 
     color_layers = [] # a list of layers for each image
     foreground_masks = [] # foreground pixels == TRUE
 
     for img in images:        
-        layers = [cv2.cvtColor(extract_hue(c, img), cv2.COLOR_BGR2GRAY) for c in colors]
+        layers = [cv2.cvtColor(extract_hue_range(min_hue, max_hue, img), cv2.COLOR_BGR2GRAY) \
+            for min_hue, max_hue in hue_ranges]
         # extract location of 0-value pixels (background)
         masks = [layer != 0 for layer in layers] 
 
@@ -219,25 +273,35 @@ if __name__ == '__main__':
         A_layers = color_layers[i]
         B_layers = color_layers[j]
 
-        # for k in range(len(colors)):
-        #     cv2.imshow("a", A_layers[k])
-        #     cv2.imshow("b", B_layers[k])
-        #     cv2.waitKey(0)
-
         ssim_layers = []
 
-        for k in range(len(colors)):
+        for k in range(n_layers):
             weights = np.logical_or(foreground_masks[i][k], foreground_masks[j][k]).astype(np.float)
+            if np.sum(weights) == 0:
+                continue
+
+            # cv2.imshow("mask_A", foreground_masks[i][k].astype(np.float))
+            # cv2.imshow("mask_B", foreground_masks[j][k].astype(np.float))
+            # cv2.waitKey(0)
+
+
+            window = np.reshape(_FSpecialGauss(filter_size, 1.5), (filter_size, filter_size))
+            weights = signal.fftconvolve(weights, window, mode='same')
             weights[weights==0] = weight_background
+
+            if DEBUG:
+                cv2.imshow("weights", weights)
+                cv2.waitKey(0)
 
             ssim, cs = SSIM(A_layers[k], 
                 B_layers[k], 
-                weights=weights, 
-                filter_size=filter_size)
+                weights=weights
+                # filter_size=filter_size
+                )
 
             ssim_layers.append(ssim)
             
-            print("SSIM - {}: {}".format(colors_hex[k], ssim))
+            print("SSIM - {}: {}".format(hue_ranges[k], ssim))
 
         score = np.mean(ssim_layers)
         print("Mean SSIM: {}".format(score))

@@ -20,7 +20,8 @@ from tqdm import tqdm
 NUM_PROCESSES = 31
 MSSIM_WEIGHTS = [0.32, 0.73, 0.82, 1, 1]
 
-
+# root_folder = "output/kim/*/*/*/*"
+root_folder = "output/kim_compare_means/*/*/*/*"
 
 class Plot:
     def __init__(self, vars, datasize, stratum, encoding, path):
@@ -115,8 +116,8 @@ def calc_sim(folder):
 pool = Pool(NUM_PROCESSES)
 
 
-folders = glob.glob("output/kim/*/*/*/*")
+folders = glob.glob(root_folder)
 
 with tqdm(total=len(folders)) as pbar:
-	for _ in pool.imap_unordered(calc_sim, folders):
-		pbar.update()
+    for _ in pool.imap_unordered(calc_sim, folders):
+	    pbar.update()

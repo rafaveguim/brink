@@ -15,6 +15,7 @@ import itertools
 from multiprocessing.pool import Pool
 from scipy.ndimage.filters import convolve
 from mssim import MultiScaleSSIM
+from tqdm import tqdm
 
 NUM_PROCESSES = 31
 MSSIM_WEIGHTS = [0.32, 0.73, 0.82, 1, 1]
@@ -87,7 +88,7 @@ def calc_sim(folder):
 
     fields  = []
     for plot1, plot2 in pairs:
-        mcs, mssim = MultiScaleSSIM(plot1.scales, plot2.scales, components=True)
+        mcs, mssim = MultiScaleSSIM(plot1.scales, plot2.scales, components=True, filter_size=[11,9,7,5,3])
         fields.append((
             folder,
             vars,
@@ -107,7 +108,7 @@ def calc_sim(folder):
     ])
     df.to_csv(folder + "/ssim.csv")
 
-    print("Finished comparison on folder " + folder)
+    # print("Finished comparison on folder " + folder)
 
 
 
@@ -116,4 +117,6 @@ pool = Pool(NUM_PROCESSES)
 
 folders = glob.glob("output/kim/*/*/*/*")
 
-list(pool.imap_unordered(calc_sim, folders))
+with tqdm(total=len(folders)) as pbar:
+	for _ in pool.imap_unordered(calc_sim, folders):
+		pbar.update()
